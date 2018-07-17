@@ -23,6 +23,9 @@ endif()
           perf
           numerics
           ${additional_unity_requirements}
+         COMPILE_FLAGS_EXTRA_GCC
+          -Wno-unknown-pragmas  # NOTE: used for auto-generated protobuf source files
+          -Wno-unused-function  # NOTE: used for auto-generated protobuf source files
   ) 
 
   # Pull in all the libraries in the extensions directory.
@@ -33,7 +36,7 @@ endif()
     add_dependencies(unity ${loop_var})
   endforeach()
 
-  if(APPLE)
+  if(APPLE AND HAS_MLCUSTOMMODEL)
     set(EXTRA_REQUIRES objcapi)
   endif()
 

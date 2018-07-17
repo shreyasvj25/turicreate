@@ -35,12 +35,6 @@ if(${TC_BUILD_PYTHON})
     message(FATAL, "Internal error: Python toolchain expected; not present.")
   endif()
 
-  if (PYTHON_VERSION)
-        set(PYTHON_VERSION ${PYTHON_VERSION} CACHE STRING "Target Python Version")
-  else()
-        set(PYTHON_VERSION "python2.7")
-  endif()
-
   include(UseCython)
   add_definitions(-DTC_HAS_PYTHON)
   add_definitions(-DTC_BUILD_VISUALIZATION_CLIENT)
@@ -77,6 +71,52 @@ endif()
 #*                       Platform Specific Stuff                          *
 #*                                                                        *
 #**************************************************************************
+if(APPLE)
+  if(TC_BUILD_IOS)
+    SET(TC_BASE_SDK iphoneos)
+    SET(COMPILER_FLAGS "${COMPILER_FLAGS} -miphoneos-version-min=12.0 -Wno-c++11-narrowing")
+  else()
+    SET(TC_BASE_SDK macosx)
+
+    # Modify COMPILER_FLAGS instead of setting CMAKE_OSX_DEPLOYMENT_TARGET so
+    # that this setting propagates to external dependencies.
+    SET(COMPILER_FLAGS "${COMPILER_FLAGS} -mmacosx-version-min=10.12")
+  endif()
+
+  EXEC_PROGRAM(xcrun ARGS --sdk ${TC_BASE_SDK} --show-sdk-version OUTPUT_VARIABLE TC_BASE_SDK_VERSION RETURN_VALUE _xcrun_ret)
+  if(NOT ${_xcrun_ret} EQUAL 0)
+    message(ERROR, "xcrun command failed with return code ${_xcrun_ret}.")
+  endif()
+
+  EXEC_PROGRAM(xcrun ARGS --sdk ${TC_BASE_SDK} --show-sdk-path OUTPUT_VARIABLE TC_BASE_SDK_PATH RETURN_VALUE _xcrun_ret)
+  if(NOT ${_xcrun_ret} EQUAL 0)
+    message(ERROR, "xcrun command failed with return code ${_xcrun_ret}.")
+  endif()
+
+  SET(CMAKE_OSX_SYSROOT "${TC_BASE_SDK_PATH}")
+  SET(COMPILER_FLAGS "${COMPILER_FLAGS} -isysroot ${TC_BASE_SDK_PATH}")
+
+  # Core ML is only present on macOS 10.13 or higher.
+  # Logic reversed to get around what seems to be a CMake bug.
+  if(NOT TC_BASE_SDK_VERSION VERSION_LESS 10.13)
+    add_definitions(-DHAS_CORE_ML)
+    set(HAS_CORE_ML TRUE)
+  endif()
+
+  # Core ML only supports batch inference on macOS 10.14 or higher
+  # Logic reversed to get around what seems to be a CMake bug.
+  if(NOT TC_BASE_SDK_VERSION VERSION_LESS 10.14)
+    add_definitions(-DHAS_CORE_ML_BATCH_INFERENCE)
+
+    # GPU-accelerated training with MPS backend requires macOS 10.14 or higher
+    set(HAS_MPS TRUE)
+
+    # CoreML MLCustomModel requires macOS 10.14 or higher
+    set(HAS_MLCUSTOMMODEL TRUE)
+  endif()
+endif()
+
+
 if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
   set(CLANG false)
 elseif(WIN32)
@@ -101,16 +141,6 @@ endif()
 
 if(WIN32 AND MINGW)
   SET(COMPILER_FLAGS "${COMPILER_FLAGS} -Wa,-mbig-obj")
-endif()
-
-if(TC_BUILD_IOS)
-  EXECUTE_PROCESS(
-    COMMAND xcrun --sdk iphoneos --show-sdk-path
-    OUTPUT_VARIABLE IOS_ISYSROOT
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
-  SET(CMAKE_OSX_SYSROOT "${IOS_ISYSROOT}")
-  SET(COMPILER_FLAGS "${COMPILER_FLAGS} -Wno-c++11-narrowing -isysroot ${IOS_ISYSROOT}")
 endif()
 
 set(MINGW_ROOT "/mingw64/bin")
@@ -184,10 +214,10 @@ message(WARNING "OpenMP Libraries were not found")
 #**************************************************************************/
 if (CLANG)
 set(CPP11_FLAGS "-std=c++11 -stdlib=libc++ -Wno-deprecated-register -Wno-enum-compare -Wno-conversion-null -Wno-constant-logical-operand -Wno-parentheses-equality -ftemplate-depth=900" CACHE STRING "C++11 enabling flags")
-set(WERROR_FLAGS "-Werror -Wno-error=tautological-undefined-compare -Wno-error=reorder -Wno-error=exceptions -Wno-error=switch -Wno-error=sometimes-uninitialized -Wno-error=unused-lambda-capture -Wno-error=missing-braces -Wno-error=absolute-value -Wno-error=potentially-evaluated-expression -Wno-error=null-arithmetic -Wno-error=format -Wno-error=pessimizing-move -Wno-error=comment -Wno-error=main -Wno-error=constant-conversion -Wno-error=deprecated-declarations -Wno-error=return-type -Wno-error=inconsistent-missing-override -Wno-error=overloaded-virtual -Wno-error=unused-private-field -Wno-error=unused-variable -Wno-error=unused-local-typedef -Wno-error=unguarded-availability-new")
+set(WERROR_FLAGS "-Werror")
 else()
 set(CPP11_FLAGS "-std=c++11 -Wno-enum-compare -Wno-conversion-null -ftemplate-depth=900" CACHE STRING "C++11 enabling flags")
-set(WERROR_FLAGS "")
+set(WERROR_FLAGS "-Werror")
 endif()
 # Shared compiler flags used by all builds (debug, profile, release)
 # Allow COMPILER_FLAGS to be used as options from the ./configure without
@@ -318,32 +348,25 @@ if(WIN32)
         set(DEBUG_OPTIMIZATION_LEVEL -O2)
 endif()
 
-# Set mac os minimum version
-if (APPLE AND NOT TC_BUILD_IOS)
- set(PLATFORM_FLAGS "-mmacosx-version-min=10.12")
-else()
- set(PLATFORM_FLAGS "")
-endif()
-
 # Set the debug flags
 set(EXTERNAL_CMAKE_C_FLAGS_DEBUG
-  "${DEBUG_OPTIMIZATION_LEVEL} ${PLATFORM_FLAGS} -Wno-attributes ${ARCH_FLAG} -Winit-self ${PROFILING_FLAGS} ${C_REAL_COMPILER_FLAGS} -fno-inline ${ALTERNATE_LINKER} -DHAVE_PTHREAD=1"
+  "${DEBUG_OPTIMIZATION_LEVEL} -Wno-attributes ${ARCH_FLAG} -Winit-self ${PROFILING_FLAGS} ${C_REAL_COMPILER_FLAGS} -fno-inline ${ALTERNATE_LINKER} -DHAVE_PTHREAD=1"
   CACHE STRING "compiler options" FORCE)
 set(CMAKE_C_FLAGS_DEBUG
   "${EXTERNAL_CMAKE_C_FLAGS_DEBUG} ${WERROR_FLAGS}"
   CACHE STRING "compiler options" FORCE)
 set(EXTERNAL_CMAKE_CXX_FLAGS_DEBUG
-  "${DEBUG_OPTIMIZATION_LEVEL} ${PLATFORM_FLAGS} ${DISABLE_WARNING_FLAGS} -Wno-attributes ${ARCH_FLAG} -Winit-self ${PROFILING_FLAGS} ${CPP_REAL_COMPILER_FLAGS} ${INT128_FLAGS} ${ALTERNATE_LINKER} -fno-inline -DHAVE_PTHREAD=1"
+  "${DEBUG_OPTIMIZATION_LEVEL} ${DISABLE_WARNING_FLAGS} -Wno-attributes ${ARCH_FLAG} -Winit-self ${PROFILING_FLAGS} ${CPP_REAL_COMPILER_FLAGS} ${INT128_FLAGS} ${ALTERNATE_LINKER} -fno-inline -DHAVE_PTHREAD=1"
   CACHE STRING "compiler options" FORCE)
 set(CMAKE_CXX_FLAGS_DEBUG
   "${EXTERNAL_CMAKE_CXX_FLAGS_DEBUG} ${WERROR_FLAGS}"
   CACHE STRING "compiler options" FORCE)
 
 set(CMAKE_C_FLAGS_RELEASE
-  "${RELEASE_OPTIMIZATION_LEVEL} ${PLATFORM_FLAGS} -Wno-attributes ${ARCH_FLAG} ${MTUNE} ${PROFILING_FLAGS} ${C_REAL_COMPILER_FLAGS} -DNDEBUG ${ALTERNATE_LINKER} -DHAVE_PTHREAD=1 -DARMA_NO_DEBUG"
+  "${RELEASE_OPTIMIZATION_LEVEL} -Wno-attributes ${ARCH_FLAG} ${MTUNE} ${PROFILING_FLAGS} ${C_REAL_COMPILER_FLAGS} ${WERROR_FLAGS} -DNDEBUG ${ALTERNATE_LINKER} -DHAVE_PTHREAD=1 -DARMA_NO_DEBUG"
   CACHE STRING "compiler options" FORCE)
 set(CMAKE_CXX_FLAGS_RELEASE
-  "${RELEASE_OPTIMIZATION_LEVEL} ${PLATFORM_FLAGS} ${EXTRA_OPTIMIZATION_FLAGS} ${DISABLE_WARNING_FLAGS} ${PROFILING_FLAGS} -Wno-attributes ${ARCH_FLAG} ${MTUNE} ${CPP_REAL_COMPILER_FLAGS} ${INT128_FLAGS} ${ALTERNATE_LINKER} -DNDEBUG -DHAVE_PTHREAD=1 -DARMA_NO_DEBUG"
+  "${RELEASE_OPTIMIZATION_LEVEL} ${EXTRA_OPTIMIZATION_FLAGS} ${DISABLE_WARNING_FLAGS} ${PROFILING_FLAGS} -Wno-attributes ${ARCH_FLAG} ${MTUNE} ${CPP_REAL_COMPILER_FLAGS} ${WERROR_FLAGS} ${INT128_FLAGS} ${ALTERNATE_LINKER} -DNDEBUG -DHAVE_PTHREAD=1 -DARMA_NO_DEBUG"
   CACHE STRING "compiler options" FORCE)
 
 
@@ -520,7 +543,9 @@ endmacro()
 macro(make_library NAME)
   set(options SHARED EXTERNAL_VISIBILITY SHARED_ALL_DEFINED DEAD_STRIP)
   set(one_value_args COMPILE_FLAGS OUTPUT_NAME EXPORT_LINUX_MAP_FILE EXPORT_OSX_MAP_FILE)
-  set(multi_value_args SOURCES REQUIRES MAC_REQUIRES LINUX_REQUIRES)
+  set(multi_value_args
+    SOURCES REQUIRES MAC_REQUIRES LINUX_REQUIRES
+    COMPILE_FLAGS_EXTRA COMPILE_FLAGS_EXTRA_CLANG COMPILE_FLAGS_EXTRA_GCC)
  CMAKE_PARSE_ARGUMENTS(make_library "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
   if(NOT make_library_SOURCES)
     MESSAGE(FATAL_ERROR "make_library call with no sources")
@@ -551,14 +576,30 @@ macro(make_library NAME)
           set_target_properties(${NAME} PROPERTIES OUTPUT_NAME ${make_library_OUTPUT_NAME})
   endif()
 
+  if (make_library_COMPILE_FLAGS_EXTRA)
+    target_compile_options(${NAME} PRIVATE ${make_library_COMPILE_FLAGS_EXTRA})
+  endif()
+
+  if (CLANG)
+    if (make_library_COMPILE_FLAGS_EXTRA_CLANG)
+      target_compile_options(${NAME} PRIVATE ${make_library_COMPILE_FLAGS_EXTRA_CLANG})
+    endif()
+  endif()
+
+  if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+    if (make_library_COMPILE_FLAGS_EXTRA_GCC)
+      target_compile_options(${NAME} PRIVATE ${make_library_COMPILE_FLAGS_EXTRA_GCC})
+    endif()
+  endif()
+
   if (${make_library_EXTERNAL_VISIBILITY})
     # do nothing
     message(STATUS "External Visibility: " ${NAME})
     target_compile_options(${NAME} PRIVATE "-fvisibility=default")
-    target_compile_options(${NAME} PRIVATE "-fvisibility-inlines-hidden")
+    target_compile_options(${NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>)
   else()
     target_compile_options(${NAME} PRIVATE "-fvisibility=hidden")
-    target_compile_options(${NAME} PRIVATE "-fvisibility-inlines-hidden")
+    target_compile_options(${NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>)
   endif()
 
   if(NOT CLANG)
@@ -674,7 +715,9 @@ endmacro()
 # when possible.
 function (make_executable NAME)
   set(one_value_args COMPILE_FLAGS OUTPUT_NAME)
-  set(multi_value_args SOURCES REQUIRES MAC_REQUIRES LINUX_REQUIRES)
+  set(multi_value_args
+    SOURCES REQUIRES MAC_REQUIRES LINUX_REQUIRES
+    COMPILE_FLAGS_EXTRA COMPILE_FLAGS_EXTRA_CLANG COMPILE_FLAGS_EXTRA_GCC)
   CMAKE_PARSE_ARGUMENTS(make_library "" "${one_value_args}" "${multi_value_args}" ${ARGN})
   if(NOT make_library_SOURCES)
     MESSAGE(FATAL_ERROR "make_library call with no sources")
@@ -691,6 +734,23 @@ function (make_executable NAME)
   endif()
 
   add_executable(${NAME} ${make_library_SOURCES})
+
+  if (make_library_COMPILE_FLAGS_EXTRA)
+    target_compile_options(${NAME} PRIVATE ${make_library_COMPILE_FLAGS_EXTRA})
+  endif()
+
+  if (CLANG)
+    if (make_library_COMPILE_FLAGS_EXTRA_CLANG)
+      target_compile_options(${NAME} PRIVATE ${make_library_COMPILE_FLAGS_EXTRA_CLANG})
+    endif()
+  endif()
+
+  if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+    if (make_library_COMPILE_FLAGS_EXTRA_GCC)
+      target_compile_options(${NAME} PRIVATE ${make_library_COMPILE_FLAGS_EXTRA_GCC})
+    endif()
+  endif()
+
   make_target_impl("${NAME}" "${make_library_COMPILE_FLAGS}"
     "${make_library_REQUIRES}" FALSE FALSE FALSE)
   if (make_library_OUTPUT_NAME)
@@ -722,31 +782,6 @@ function (make_boost_test NAME)
 
   add_test(${NAME} ${NAME}test)
 endfunction()
-
-
-if(APPLE)
-  EXEC_PROGRAM(xcrun ARGS --show-sdk-version OUTPUT_VARIABLE mac_version RETURN_VALUE _xcrun_ret)
-
-  if(NOT ${_xcrun_ret} EQUAL 0)
-    message(ERROR, "xcrun command failed with return code ${_xcrun_ret}.")
-  endif()
-
-  # Core ML is only present on macOS 10.13 or higher.
-  # Logic reversed to get around what seems to be a CMake bug.
-  if(NOT mac_version VERSION_LESS 10.13)
-    add_definitions(-DHAS_CORE_ML)
-    set(HAS_CORE_ML TRUE)
-  endif()
-
-  # Core ML only supports batch inference on macOS 10.14 or higher
-  # Logic reversed to get around what seems to be a CMake bug.
-  if(NOT mac_version VERSION_LESS 10.14)
-    add_definitions(-DHAS_CORE_ML_BATCH_INFERENCE)
-
-    # GPU-accelerated training with MPS backend requires macOS 10.14 or higher
-    set(HAS_MPS TRUE)
-  endif()
-endif()
 
 
 # This is an external function

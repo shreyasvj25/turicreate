@@ -605,6 +605,11 @@ class EXPORT supervised_learning_model_base : public ml_model_base {
   std::vector<std::string> get_tracking_metrics()  const;
 
   /**
+   * Get metric display name.
+   */
+  std::string get_metric_display_name(const std::string& metric) const;
+
+  /**
    * Display model training data summary for regression.
    *
    * \param[in] model_display_name   Name to be displayed
@@ -646,7 +651,7 @@ class EXPORT supervised_learning_model_base : public ml_model_base {
    */
   void api_train(gl_sframe data, const std::string& target,
                  const variant_type& validation_data,
-                 const std::map<std::string, flexible_type>& options);
+                 const std::map<std::string, flexible_type>& _options);
 
   /**
    *  API interface through the unity server.
@@ -681,7 +686,7 @@ class EXPORT supervised_learning_model_base : public ml_model_base {
    */
   // TODO: This function should be const
   variant_map_type api_evaluate(
-      gl_sframe data, std::string missing_value_action, std::string metric);
+      gl_sframe data, std::string missing_value_action, std::string metric, gl_sarray predictions = gl_sarray());
 
   /**
    *  API interface through the unity server.
@@ -764,6 +769,7 @@ class EXPORT supervised_learning_model_base : public ml_model_base {
                                                                                \
   register_defaults("evaluate",                                                \
                     {{"metric", std::string("_report")},                        \
+                     {"predictions", gl_sarray()},                             \
                      {"missing_value_action", std::string("auto")}});          \
                                                                                \
   REGISTER_NAMED_CLASS_MEMBER_FUNCTION("extract_features",                     \

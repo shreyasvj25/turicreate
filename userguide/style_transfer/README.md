@@ -1,12 +1,16 @@
 # Style Transfer
 
+***Note:*** *This functionality is available in the beta release of Turi Create 5.0. For a 
+full list of 5.0 features and installation instructions, see 
+[release notes](https://github.com/apple/turicreate/releases/tag/5.0b1)*
+
 Style Transfer is a task wherein the stylistic elements of a style image
 are imitated onto a new image while preserving the content of the new
 image. As an example, a style transfer model that uses these [style
 images](#style-images) when applied to this [content image](#content-image) 
 results in:
 
-![Photo of cat in different styles](#style-images)](images/cat-stylized.png)
+![Photo of cat in different styles](images/cat-stylized.png)
 
 The training procedure for style transfer requires the following data:
 - Content images: A set of representative images in your application

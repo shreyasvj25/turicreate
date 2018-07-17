@@ -32,6 +32,7 @@ from .. import _pre_trained_models
 from ._evaluation import average_precision as _average_precision
 from .._mps_utils import (use_mps as _use_mps,
                           mps_device_name as _mps_device_name,
+                          mps_device_memory_limit as _mps_device_memory_limit,
                           MpsGraphAPI as _MpsGraphAPI,
                           MpsGraphNetworkType as _MpsGraphNetworkType,
                           MpsGraphMode as _MpsGraphMode,
@@ -98,7 +99,8 @@ def _raise_error_if_not_detection_sframe(dataset, feature, annotations, require_
 
 
 def create(dataset, annotations=None, feature=None, model='darknet-yolo',
-           classes=None, max_iterations=0, verbose=True, **kwargs):
+           classes=None, batch_size=0, max_iterations=0, verbose=True,
+           **kwargs):
     """
     Create a :class:`ObjectDetector` model.
 
@@ -142,6 +144,10 @@ def create(dataset, annotations=None, feature=None, model='darknet-yolo',
     classes : list optional
         List of strings containing the names of the classes of objects.
         Inferred from the data if not provided.
+
+    batch_size: int
+        The number of images per training iteration. If 0, then it will be
+        automatically determined based on resource availability.
 
     max_iterations : int
         The number of training iterations. If 0, then it will be automatically
@@ -217,7 +223,6 @@ def create(dataset, annotations=None, feature=None, model='darknet-yolo',
             (16.0, 32.0), (16.0, 16.0), (32.0, 16.0),
         ],
         'grid_shape': [13, 13],
-        'batch_size': 32,
         'aug_resize': 0,
         'aug_rand_crop': 0.9,
         'aug_rand_pad': 0.9,
@@ -247,7 +252,9 @@ def create(dataset, annotations=None, feature=None, model='darknet-yolo',
         'learning_rate': 1.0e-3,
         'shuffle': True,
         'mps_loss_mult': 8,
-        'use_io_threads': True,
+        # This large buffer size (8 batches) is an attempt to mitigate against
+        # the SFrame shuffle operation that can occur after each epoch.
+        'io_thread_buffer_size': 8,
     }
 
     if '_advanced_parameters' in kwargs:
@@ -263,18 +270,25 @@ def create(dataset, annotations=None, feature=None, model='darknet-yolo',
     anchors = params['anchors']
     num_anchors = len(anchors)
 
-    num_mxnet_gpus = _mxnet_utils.get_num_gpus_in_use(max_devices=params['batch_size'])
-    batch_size_each = params['batch_size'] // max(num_mxnet_gpus, 1)
+    if batch_size < 1:
+        batch_size = 32  # Default if not user-specified
+    num_mxnet_gpus = _mxnet_utils.get_num_gpus_in_use(max_devices=batch_size)
+    use_mps = _use_mps() and num_mxnet_gpus == 0
+    batch_size_each = batch_size // max(num_mxnet_gpus, 1)
+    if use_mps and _mps_device_memory_limit() < 4 * 1024 * 1024 * 1024:
+        # Reduce batch size for GPUs with less than 4GB RAM
+        batch_size_each = 16
     # Note, this may slightly alter the batch size to fit evenly on the GPUs
     batch_size = max(num_mxnet_gpus, 1) * batch_size_each
-    use_mps = _use_mps() and num_mxnet_gpus == 0
+    if verbose:
+        print("Setting 'batch_size' to {}".format(batch_size))
 
 
     # The IO thread also handles MXNet-powered data augmentation. This seems
     # to be problematic to run independently of a MXNet-powered neural network
     # in a separate thread. For this reason, we restrict IO threads to when
     # the neural network backend is MPS.
-    use_io_threads = use_mps and params['use_io_threads']
+    io_thread_buffer_size = params['io_thread_buffer_size'] if use_mps else 0
 
     if verbose:
         if use_mps:
@@ -335,6 +349,7 @@ def create(dataset, annotations=None, feature=None, model='darknet-yolo',
                                   loader_type='augmented',
                                   feature_column=feature,
                                   annotations_column=annotations,
+                                  io_thread_buffer_size=io_thread_buffer_size,
                                   iterations=num_iterations)
 
     # Predictions per anchor box: x/y + w/h + object confidence + class probs
@@ -376,7 +391,38 @@ def create(dataset, annotations=None, feature=None, model='darknet-yolo',
     # easily hide bugs caused by names getting out of sync.
     ref_model.available_parameters_subset(net_params).load(ref_model.model_path, ctx)
 
+    if verbose:
+        # Print progress table header
+        column_names = ['Iteration', 'Loss', 'Elapsed Time']
+        num_columns = len(column_names)
+        column_width = max(map(lambda x: len(x), column_names)) + 2
+        hr = '+' + '+'.join(['-' * column_width] * num_columns) + '+'
+        print(hr)
+        print(('| {:<{width}}' * num_columns + '|').format(*column_names, width=column_width-1))
+        print(hr)
+
+    progress = {'smoothed_loss': None, 'last_time': 0}
+    iteration = 0
+
+    def update_progress(cur_loss, iteration):
+        iteration_base1 = iteration + 1
+        if progress['smoothed_loss'] is None:
+            progress['smoothed_loss'] = cur_loss
+        else:
+            progress['smoothed_loss'] = 0.9 * progress['smoothed_loss'] + 0.1 * cur_loss
+        cur_time = _time.time()
+        if verbose and (cur_time > progress['last_time'] + 10 or
+                        iteration_base1 == max_iterations):
+            # Print progress table row
+            elapsed_time = cur_time - start_time
+            print("| {cur_iter:<{width}}| {loss:<{width}.3f}| {time:<{width}.1f}|".format(
+                cur_iter=iteration_base1, loss=progress['smoothed_loss'],
+                time=elapsed_time , width=column_width-1))
+            progress['last_time'] = cur_time
+
     if use_mps:
+        # Force initialization of net_params
+        # TODO: Do not rely on MXNet to initialize MPS-based network
         net.forward(_mx.nd.uniform(0, 1, (batch_size_each,) + input_image_shape))
         mps_net_params = {}
         keys = list(net_params)
@@ -414,7 +460,104 @@ def create(dataset, annotations=None, feature=None, model='darknet-yolo',
                                   anchors=anchors,
                                   config=mps_config,
                                   weights=mps_net_params)
-    else:
+
+        # Use worker threads to isolate different points of synchronization
+        # and/or waiting for non-Python tasks to finish. The
+        # sframe_worker_thread will spend most of its time waiting for SFrame
+        # operations, largely image I/O and decoding, along with scheduling
+        # MXNet data augmentation. The numpy_worker_thread will spend most of
+        # its time waiting for MXNet data augmentation to complete, along with
+        # copying the results into NumPy arrays. Finally, the main thread will
+        # spend most of its time copying NumPy data into MPS and waiting for the
+        # results. Note that using three threads here only makes sense because
+        # each thread spends time waiting for non-Python code to finish (so that
+        # no thread hogs the global interpreter lock).
+        mxnet_batch_queue = _Queue(1)
+        numpy_batch_queue = _Queue(1)
+        def sframe_worker():
+            # Once a batch is loaded into NumPy, pass it immediately to the
+            # numpy_worker so that we can start I/O and decoding for the next
+            # batch.
+            for batch in loader:
+                mxnet_batch_queue.put(batch)
+            mxnet_batch_queue.put(None)
+        def numpy_worker():
+            while True:
+                batch = mxnet_batch_queue.get()
+                if batch is None:
+                    break
+
+                for x, y in zip(batch.data, batch.label):
+                    # Convert to NumPy arrays with required shapes. Note that
+                    # asnumpy waits for any pending MXNet operations to finish.
+                    input_data = _mxnet_to_mps(x.asnumpy())
+                    label_data = y.asnumpy().reshape(y.shape[:-2] + (-1,))
+
+                    # Convert to packed 32-bit arrays.
+                    input_data = input_data.astype(_np.float32)
+                    if not input_data.flags.c_contiguous:
+                        input_data = input_data.copy()
+                    label_data = label_data.astype(_np.float32)
+                    if not label_data.flags.c_contiguous:
+                        label_data = label_data.copy()
+
+                    # Push this batch to the main thread.
+                    numpy_batch_queue.put({'input'     : input_data,
+                                           'label'     : label_data,
+                                           'iteration' : batch.iteration})
+            # Tell the main thread there's no more data.
+            numpy_batch_queue.put(None)
+        sframe_worker_thread = _Thread(target=sframe_worker)
+        sframe_worker_thread.start()
+        numpy_worker_thread = _Thread(target=numpy_worker)
+        numpy_worker_thread.start()
+
+        batches_started = 0
+        batches_finished = 0
+        while True:
+            batch = numpy_batch_queue.get()
+            if batch is None:
+                break
+
+            # Adjust learning rate according to our schedule.
+            if batch['iteration'] in steps:
+                ii = steps.index(batch['iteration']) + 1
+                new_lr = factors[ii] * base_lr
+                mps_net.set_learning_rate(new_lr / mps_loss_mult)
+
+            # Submit this match to MPS.
+            mps_net.start_batch(batch['input'], label=batch['label'])
+            batches_started += 1
+
+            # If we have two batches in flight, wait for the first one.
+            if batches_started - batches_finished > 1:
+                batches_finished += 1
+                cur_loss = mps_net.wait_for_batch().sum() / mps_loss_mult
+
+                # If we just submitted the first batch of an iteration, update
+                # progress for the iteration completed by the last batch we just
+                # waited for.
+                if batch['iteration'] > iteration:
+                    update_progress(cur_loss, iteration)
+            iteration = batch['iteration']
+
+        # Wait for any pending batches and finalize our progress updates.
+        while batches_finished < batches_started:
+            batches_finished += 1
+            cur_loss = mps_net.wait_for_batch().sum() / mps_loss_mult
+        update_progress(cur_loss, iteration)
+
+        sframe_worker_thread.join()
+        numpy_worker_thread.join()
+
+        # Load back into mxnet
+        mps_net_params = mps_net.export()
+        keys = mps_net_params.keys()
+        for k in keys:
+            if k in net_params:
+                net_params[k].set_data(_mps_to_mxnet(mps_net_params[k]))
+
+    else:  # Use MxNet
         options = {'learning_rate': base_lr, 'lr_scheduler': lr_scheduler,
                    'momentum': params['sgd_momentum'], 'wd': params['weight_decay'], 'rescale_grad': 1.0}
         clip_grad = params.get('clip_gradients')
@@ -422,23 +565,7 @@ def create(dataset, annotations=None, feature=None, model='darknet-yolo',
             options['clip_gradient'] = clip_grad
         trainer = _mx.gluon.Trainer(net.collect_params(), 'sgd', options)
 
-    progress = {'smoothed_loss': None, 'last_time': 0}
-
-    def handle_request(batch):
-        if use_mps:
-            for x, y in zip(batch.data, batch.label):
-                input_data = _mxnet_to_mps(x.asnumpy())
-                label_data = y.asnumpy().reshape(y.shape[:-2] + (-1,))
-
-                if batch.iteration in steps:
-                    ii = steps.index(batch.iteration) + 1
-                    new_lr = factors[ii] * base_lr
-                    mps_net.set_learning_rate(new_lr / mps_loss_mult)
-
-                mps_net.set_input(input_data)
-                mps_net.set_label(label_data)
-                cur_loss = mps_net.run_graph().sum() / mps_loss_mult
-        else:
+        for batch in loader:
             data = _mx.gluon.utils.split_and_load(batch.data[0], ctx_list=ctx, batch_axis=0)
             label = _mx.gluon.utils.split_and_load(batch.label[0], ctx_list=ctx, batch_axis=0)
 
@@ -456,79 +583,9 @@ def create(dataset, annotations=None, feature=None, model='darknet-yolo',
 
             trainer.step(1)
             cur_loss = _np.mean([L.asnumpy()[0] for L in Ls])
-        return cur_loss
 
-    def consume_response(cur_loss, iteration):
-        iteration_base1 = iteration + 1
-        if progress['smoothed_loss'] is None:
-            progress['smoothed_loss'] = cur_loss
-        else:
-            progress['smoothed_loss'] = 0.9 * progress['smoothed_loss'] + 0.1 * cur_loss
-        cur_time = _time.time()
-        if verbose and (cur_time > progress['last_time'] + 10 or
-                        iteration_base1 == max_iterations):
-            # Print progress table row
-            elapsed_time = cur_time - start_time
-            print("| {cur_iter:<{width}}| {loss:<{width}.3f}| {time:<{width}.1f}|".format(
-                cur_iter=iteration_base1, loss=progress['smoothed_loss'],
-                time=elapsed_time , width=column_width-1))
-            progress['last_time'] = cur_time
-
-    request_queue = _Queue()
-    response_queue = _Queue()
-
-    if verbose:
-        # Print progress table header
-        column_names = ['Iteration', 'Loss', 'Elapsed Time']
-        num_columns = len(column_names)
-        column_width = max(map(lambda x: len(x), column_names)) + 2
-        hr = '+' + '+'.join(['-' * column_width] * num_columns) + '+'
-        print(hr)
-        print(('| {:<{width}}' * num_columns + '|').format(*column_names, width=column_width-1))
-        print(hr)
-
-    iteration = 0
-    if not use_io_threads:
-        for batch in loader:
-            cur_loss = handle_request(batch)
-            consume_response(cur_loss, batch.iteration)
+            update_progress(cur_loss, batch.iteration)
             iteration = batch.iteration
-    else:
-        def model_worker():
-            while True:
-                batch = request_queue.get()  # Consume request
-                if batch is None:
-                    # No more work remains. Allow the thread to finish.
-                    return
-                response_queue.put((handle_request(batch), batch.iteration))  # Produce response
-        model_worker_thread = _Thread(target=model_worker)
-        model_worker_thread.start()
-
-        try:
-            # Attempt to have two requests in progress at any one time (double
-            # buffering), so that the iterator is creating one batch while MXNet
-            # performs inference on the other.
-            if loader.has_next:
-                request_queue.put(next(loader))
-                while loader.has_next:
-                    request_queue.put(next(loader))
-                    consume_response(*response_queue.get())
-                consume_response(*response_queue.get())
-
-        finally:
-            # Tell the worker thread to shut down.
-            request_queue.put(None)
-
-        model_worker_thread.join()
-
-    # If mps was used, load model back into mxnet
-    if use_mps:
-        mps_net_params = mps_net.export()
-        keys = mps_net_params.keys()
-        for k in keys:
-            if k in net_params:
-                net_params[k].set_data(_mps_to_mxnet(mps_net_params[k]))
-
 
     training_time = _time.time() - start_time
     if verbose:
@@ -553,7 +610,7 @@ def create(dataset, annotations=None, feature=None, model='darknet-yolo',
         'num_examples': num_images,
         'num_bounding_boxes': num_instances,
         'training_time': training_time,
-        'training_epochs': loader.cur_epoch,
+        'training_epochs': training_iterations * batch_size // num_images,
         'training_iterations': training_iterations,
         'max_iterations': max_iterations,
         'training_loss': progress['smoothed_loss'],
@@ -761,8 +818,8 @@ class ObjectDetector(_CustomModel):
                                                     dtype=mps_data.dtype)
                         mps_data_padded[:mps_data.shape[0]] = mps_data
                         mps_data = mps_data_padded
-                    self._mps_inference_net.set_input(mps_data)
-                    mps_z = self._mps_inference_net.run_graph()[:n_samples]
+                    self._mps_inference_net.start_batch(mps_data)
+                    mps_z = self._mps_inference_net.wait_for_batch()[:n_samples]
                     z = _mps_to_mxnet(mps_z)
                 else:
                     z = self._model(data).asnumpy()
@@ -848,16 +905,31 @@ class ObjectDetector(_CustomModel):
         return self._predict_with_options(dataset, with_ground_truth=False,
                                           postprocess=False)
 
+    def _canonize_input(self, dataset):
+        """
+        Takes input and returns tuple of the input in canonical form (SFrame)
+        along with an unpack callback function that can be applied to
+        prediction results to "undo" the canonization.
+        """
+        unpack = lambda x: x
+        if isinstance(dataset, _tc.SArray):
+            dataset = _tc.SFrame({self.feature: dataset})
+        elif isinstance(dataset, _tc.Image):
+            dataset = _tc.SFrame({self.feature: [dataset]})
+            unpack = lambda x: x[0]
+        return dataset, unpack
+
     def predict(self, dataset, confidence_threshold=0.25, verbose=True):
         """
         Predict object instances in an sframe of images.
 
         Parameters
         ----------
-        dataset : SFrame
-            A dataset that has the same columns that were used during training.
-            If the annotations column exists in ``dataset`` it will be ignored
-            while making predictions.
+        dataset : SFrame | SArray | turicreate.Image
+            The images on which to perform object detection.
+            If dataset is an SFrame, it must have a column with the same name
+            as the feature column during training. Additional columns are
+            ignored.
 
         confidence_threshold : float
             Only return predictions above this level of confidence. The
@@ -871,7 +943,9 @@ class ObjectDetector(_CustomModel):
         out : SArray
             An SArray with model predictions. Each element corresponds to
             an image and contains a list of dictionaries. Each dictionary
-            describes an object instances that was found in the image.
+            describes an object instances that was found in the image. If
+            `dataset` is a single image, the return value will be a single
+            prediction.
 
         See Also
         --------
@@ -900,12 +974,13 @@ class ObjectDetector(_CustomModel):
             >>> data['image_pred'] = turicreate.object_detector.util.draw_bounding_boxes(data['image'], data['predictions'])
         """
         _numeric_param_check_range('confidence_threshold', confidence_threshold, 0.0, 1.0)
+        dataset, unpack = self._canonize_input(dataset)
         stacked_pred = self._predict_with_options(dataset, with_ground_truth=False,
                                                   confidence_threshold=confidence_threshold,
                                                   verbose=verbose)
 
         from . import util
-        return util.unstack_annotations(stacked_pred, num_rows=len(dataset))
+        return unpack(util.unstack_annotations(stacked_pred, num_rows=len(dataset)))
 
     def evaluate(self, dataset, metric='auto', output_type='dict', verbose=True):
         """
@@ -1474,35 +1549,41 @@ class ObjectDetector(_CustomModel):
         iouThresholdString = '(optional) IOU Threshold override (default: {})'
         confidenceThresholdString = ('(optional)' + 
             ' Confidence Threshold override (default: {})')
-        mlmodel = coremltools.models.MLModel(model)
         model_type = 'object detector (%s)' % self.model
-        mlmodel.short_description = _coreml_utils._mlmodel_short_description(
-            model_type)
-        mlmodel.input_description[self.feature] = 'Input image'
+        model.description.metadata.shortDescription = \
+            _coreml_utils._mlmodel_short_description(model_type)
+        model.description.input[0].shortDescription = 'Input image'
         if include_non_maximum_suppression:
             iouThresholdString = '(optional) IOU Threshold override (default: {})'
-            mlmodel.input_description['iouThreshold'] = \
+            model.description.input[1].shortDescription = \
                 iouThresholdString.format(iou_threshold)
             confidenceThresholdString = ('(optional)' + 
                 ' Confidence Threshold override (default: {})')
-            mlmodel.input_description['confidenceThreshold'] = \
+            model.description.input[2].shortDescription = \
                 confidenceThresholdString.format(confidence_threshold)
-        mlmodel.output_description['confidence'] = \
-                u'Boxes \xd7 Class confidence (see user-defined metadata "classes")'
-        mlmodel.output_description['coordinates'] = \
-                u'Boxes \xd7 [x, y, width, height] (relative to image size)'
-        _coreml_utils._set_model_metadata(mlmodel, self.__class__.__name__, {
-                'model': self.model,
-                'max_iterations': str(self.max_iterations),
-                'training_iterations': str(self.training_iterations),
-                'include_non_maximum_suppression': str(
-                    include_non_maximum_suppression),
-                'non_maximum_suppression_threshold': str(
-                    iou_threshold),
-                'confidence_threshold': str(confidence_threshold),
-                'iou_threshold': str(iou_threshold),
-                'feature': self.feature,
-                'annotations': self.annotations,
-                'classes': ','.join(self.classes),
-            }, version=ObjectDetector._PYTHON_OBJECT_DETECTOR_VERSION)
-        mlmodel.save(filename)
+        model.description.output[0].shortDescription = \
+            u'Boxes \xd7 Class confidence (see user-defined metadata "classes")'
+        model.description.output[1].shortDescription = \
+            u'Boxes \xd7 [x, y, width, height] (relative to image size)'
+        version = ObjectDetector._PYTHON_OBJECT_DETECTOR_VERSION
+        partial_user_defined_metadata = {
+            'model': self.model,
+            'max_iterations': str(self.max_iterations),
+            'training_iterations': str(self.training_iterations),
+            'include_non_maximum_suppression': str(
+                include_non_maximum_suppression),
+            'non_maximum_suppression_threshold': str(
+                iou_threshold),
+            'confidence_threshold': str(confidence_threshold),
+            'iou_threshold': str(iou_threshold),
+            'feature': self.feature,
+            'annotations': self.annotations,
+            'classes': ','.join(self.classes)
+        }
+        user_defined_metadata = _coreml_utils._get_model_metadata(
+            self.__class__.__name__,
+            partial_user_defined_metadata,
+            version)
+        model.description.metadata.userDefined.update(user_defined_metadata)
+        from coremltools.models.utils import save_spec as _save_spec
+        _save_spec(model, filename)

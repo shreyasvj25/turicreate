@@ -284,7 +284,6 @@ def create(dataset, target, model_name, features=None,
         List of feature names used by feature column
 
     validation_set : SFrame, optional
-
         A dataset for monitoring the model's generalization performance.
         For each row of the progress table, the chosen metrics are computed
         for both the provided training dataset and the validation_set. The
@@ -507,8 +506,8 @@ def create_classification_with_model_selector(dataset, target, model_selector,
         # Most models have this.
         elif 'progress' in m._list_fields():
             prog = m.progress
-            validation_column = 'Validation-accuracy'
-            accuracy_column = 'Training-accuracy'
+            validation_column = 'Validation Accuracy'
+            accuracy_column = 'Training Accuracy'
             if validation_column in prog.column_names():
                 metrics[model_name] = float(prog[validation_column].tail(1)[0])
             else:

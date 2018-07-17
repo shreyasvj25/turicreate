@@ -158,6 +158,7 @@ void build_vision_feature_print_screen_spec(const std::string& model_path) {
 
 }
 
+API_AVAILABLE(macos(10.13))
 static MLModel *create_model(const std::string& download_path,
 			     const std::string& model_name) {
 
@@ -295,15 +296,17 @@ CVPixelBufferRef create_pixel_buffer_from_flex_image(const flex_image image) {
 }  // namespace
 
 struct mlmodel_image_feature_extractor::impl {
+  API_AVAILABLE(macos(10.13))
   ~impl() {
     [model release];
   }
 
   std::string name;
-  MLModel *model = nil;
+  API_AVAILABLE(macos(10.13)) MLModel *model = nil;
   CoreML::Specification::Model spec;
 };
 
+API_AVAILABLE(macos(10.13))
 mlmodel_image_feature_extractor::mlmodel_image_feature_extractor(
     const std::string& model_name, const std::string& download_path)
   : m_impl(new impl) {
@@ -333,6 +336,7 @@ mlmodel_image_feature_extractor::coreml_spec() const {
   return m_impl->spec;
 }
 
+API_AVAILABLE(macos(10.13))
 gl_sarray
 mlmodel_image_feature_extractor::extract_features(gl_sarray data, bool verbose, size_t kBatchSize) const {
   ASSERT_EQ((int)data.dtype(), (int)flex_type_enum::IMAGE);
@@ -346,8 +350,6 @@ mlmodel_image_feature_extractor::extract_features(gl_sarray data, bool verbose, 
 
   mutex mut;
 
-  timer tt;
-  tt.start();
   table_printer table(
         { {"Images Processed", 0}, {"Elapsed Time", 0}, {"Percent Complete", 0} }, 0);
   if (verbose) {
@@ -439,8 +441,8 @@ mlmodel_image_feature_extractor::extract_features(gl_sarray data, bool verbose, 
       [image_batch release];
       checkNSError(error);
 
-      for (NSInteger i = 0; i < features_batch.featureProviderCount; ++i) {
-        [outputs addObject:[features_batch featureProviderAtIndex:i]];
+      for (NSInteger i = 0; i < features_batch.count; ++i) {
+        [outputs addObject:[features_batch featuresAtIndex:i]];
       }
     } else {
 #else
@@ -482,23 +484,28 @@ mlmodel_image_feature_extractor::extract_features(gl_sarray data, bool verbose, 
   parallel_for(0, batch_count, [&](size_t batch_index) {
     @autoreleasepool {
 
-      if (verbose) {
+      perform_batch(batch_index);
+
+      // Only touch the atomic variable once per iteration
+      const size_t local_batches_completed = ++batches_completed;
+
+      if (verbose && local_batches_completed < batch_count) {
         std::ostringstream d;
         // For pretty printing, floor percent done
         // resolution to the nearest .25% interval.  Do this by multiplying by
         // 400, then do integer division by the total size, then float divide
         // by 4.0
-        d << (double(size_t(400 * batches_completed) / batch_count) / 4.0) << '%';
-        table.print_progress_row(batches_completed, batches_completed * kBatchSize,
-                                 progress_time(tt), d.str());
+        d << local_batches_completed * 400 / batch_count / 4.0 << '%';
+        table.print_progress_row(local_batches_completed,
+                                 local_batches_completed * kBatchSize,
+                                 progress_time(), d.str());
       }
 
-      perform_batch(batch_index);
-      batches_completed++;
     } // end autoreleasepool
   });
 
   if (verbose) {
+    table.print_row(data.size(), progress_time(), "100%");
     table.print_footer();
   }
   return gl_sarray(result, flex_type_enum::VECTOR);

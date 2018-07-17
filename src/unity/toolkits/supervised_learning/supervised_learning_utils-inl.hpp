@@ -337,6 +337,7 @@ inline void check_feature_means_and_variances(
       if (!std::isfinite(stats->mean(i))) {
         error_columns.push_back(col);
         column_with_nan = true;
+        break;
       }
     }
   }
@@ -377,9 +378,9 @@ inline std::vector<std::pair<std::string, size_t>> make_printer_header(
   };
 
   for (const auto& m: metrics) {
-    header.push_back({std::string("Training-") + m, 6});
+    header.push_back({std::string("Training ") + m, 6});
     if (has_validation)
-      header.push_back({std::string("Validation-") + m, 6});
+      header.push_back({std::string("Validation ") + m, 6});
   }
 
   header.push_back({"Examples/second", 0});
@@ -428,9 +429,10 @@ inline std::vector<std::pair<std::string, size_t>> make_progress_header(
   }
 
   for (const auto& m: metrics) {
-    header.push_back({std::string("Training-") + m, 6});
+    std::string dm = smodel.get_metric_display_name(m);
+    header.push_back({std::string("Training ") + dm, 6});
     if (has_validation_data) 
-      header.push_back({std::string("Validation-") + m, 6});
+      header.push_back({std::string("Validation ") + dm, 6});
   }
 
   return header;

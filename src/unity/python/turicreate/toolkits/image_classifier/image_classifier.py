@@ -64,8 +64,8 @@ def create(dataset, target, feature = None, model = 'resnet-50',
                                  Exported Core ML model will be ~4.7M.
 
            - "VisionFeaturePrint_Screen": Uses an OS internal feature extractor.
-                                          Only on available on iOS,tvOS 12.0+,
-                                          macOS 10.14+.
+                                          Only on available on iOS 12.0+,
+                                          macOS 10.14+ and tvOS 12.0+.
                                           Exported Core ML model will be ~41K.
 
         Models are downloaded from the internet if not available locally. Once
@@ -239,7 +239,7 @@ class ImageClassifier(_CustomModel):
         # Load pre-trained model & feature extractor
         model_name = state['model']
         if model_name == "VisionFeaturePrint_Screen" and _mac_ver() < (10,14):
-            raise ToolkitError("Can not load model on this operating system. This model uses VisionFeaturePrint_Screen, " \
+            raise ToolkitError("Can not load model on this operating system. This model uses VisionFeaturePrint_Screen, "
                                "which is only supported on macOS 10.14 and higher.")
         state['feature_extractor'] = _image_feature_extractor._create_feature_extractor(model_name)
         state['input_image_shape'] = tuple([int(i) for i in state['input_image_shape']])
@@ -300,6 +300,20 @@ class ImageClassifier(_CustomModel):
         section_titles = ['Schema', 'Training summary']
         return([model_fields, training_fields], section_titles)
 
+    def _canonize_input(self, dataset):
+        """
+        Takes input and returns tuple of the input in canonical form (SFrame)
+        along with an unpack callback function that can be applied to
+        prediction results to "undo" the canonization.
+        """
+        unpack = lambda x: x
+        if isinstance(dataset, _tc.SArray):
+            dataset = _tc.SFrame({self.feature: dataset})
+        elif isinstance(dataset, _tc.Image):
+            dataset = _tc.SFrame({self.feature: [dataset]})
+            unpack = lambda x: x[0]
+        return dataset, unpack
+
     def predict(self, dataset, output_type='class', batch_size=64):
         """
         Return predictions for ``dataset``, using the trained logistic
@@ -321,7 +335,7 @@ class ImageClassifier(_CustomModel):
         ----------
         dataset : SFrame | SArray | turicreate.Image
             The images to be classified.
-            If dataset is an SFrame, it must have a columns with the same names as
+            If dataset is an SFrame, it must have columns with the same names as
             the features used for model training, but does not require a target
             column. Additional columns are ignored.
 
@@ -344,7 +358,8 @@ class ImageClassifier(_CustomModel):
         Returns
         -------
         out : SArray
-            An SArray with model predictions.
+            An SArray with model predictions. If `dataset` is a single image, the
+            return value will be a single prediction.
 
         See Also
         ----------
@@ -362,13 +377,10 @@ class ImageClassifier(_CustomModel):
         if(batch_size < 1):
             raise ValueError("'batch_size' must be greater than or equal to 1")
 
-        if isinstance(dataset, _tc.SArray):
-            dataset = _tc.SFrame({self.feature: dataset})
-        elif isinstance(dataset, _tc.Image):
-            dataset = _tc.SFrame({self.feature: [dataset]})
+        dataset, unpack = self._canonize_input(dataset)
 
         extracted_features = self._extract_features(dataset, batch_size=batch_size)
-        return self.classifier.predict(extracted_features, output_type=output_type)
+        return unpack(self.classifier.predict(extracted_features, output_type=output_type))
 
     def classify(self, dataset, batch_size=64):
         """
@@ -392,7 +404,9 @@ class ImageClassifier(_CustomModel):
         Returns
         -------
         out : SFrame
-            An SFrame with model predictions i.e class labels and probabilities.
+            An SFrame with model predictions i.e class labels and
+            probabilities. If `dataset` is a single image, the return will be a
+            single row (dict).
 
         See Also
         ----------
@@ -408,13 +422,10 @@ class ImageClassifier(_CustomModel):
         if(batch_size < 1):
             raise ValueError("'batch_size' must be greater than or equal to 1")
 
-        if isinstance(dataset, _tc.SArray):
-            dataset = _tc.SFrame({self.feature: dataset})
-        elif isinstance(dataset, _tc.Image):
-            dataset = _tc.SFrame({self.feature: [dataset]})
+        dataset, unpack = self._canonize_input(dataset)
 
         extracted_features = self._extract_features(dataset, batch_size=batch_size)
-        return self.classifier.classify(extracted_features)
+        return unpack(self.classifier.classify(extracted_features))
 
     def predict_topk(self, dataset, output_type="probability", k=3, batch_size=64):
         """
@@ -476,10 +487,7 @@ class ImageClassifier(_CustomModel):
         if(batch_size < 1):
             raise ValueError("'batch_size' must be greater than or equal to 1")
 
-        if isinstance(dataset, _tc.SArray):
-            dataset = _tc.SFrame({self.feature: dataset})
-        elif isinstance(dataset, _tc.Image):
-            dataset = _tc.SFrame({self.feature: [dataset]})
+        dataset, _ = self._canonize_input(dataset)
 
         extracted_features = self._extract_features(dataset)
         return self.classifier.predict_topk(extracted_features, output_type = output_type, k = k)
@@ -590,7 +598,7 @@ class ImageClassifier(_CustomModel):
             input.type.imageType.colorSpace = BGR_VALUE
 
             #
-            # Scene print feature extractor
+            # VisionFeaturePrint extractor
             #
             pipelineClassifier = top_spec.pipelineClassifier
             scene_print = pipelineClassifier.pipeline.models.add()

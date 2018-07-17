@@ -32,7 +32,8 @@
 #import <vector>
 #import "mps_utils.h"
 
-@interface RandomWeights : NSObject <MPSCNNConvolutionDataSource> {
+API_AVAILABLE(macos(10.14))
+@interface TCMPSConvolutionWeights : NSObject <MPSCNNConvolutionDataSource> {
 @private
   NSUInteger _outputFeatureChannels;
   NSUInteger _inputFeatureChannels;
@@ -43,25 +44,14 @@
 
   size_t sizeBias, sizeWeights;
   unsigned _seed;
-  OptimizerOptions _optimizerOptions;
-  float t;
+  turi::mps::OptimizerOptions _optimizerOptions;
 
   id<MTLBuffer> weightMomentumBuffer, biasMomentumBuffer, weightVelocityBuffer,
       biasVelocityBuffer, weightBuffer, biasBuffer;
-  MPSVector *weightMomentumVector, *biasMomentumVector, *weightVelocityVector,
-      *biasVelocityVector, *weightVector, *biasVector;
-
-  MPSNNOptimizerAdam *adamWeights, *adamBias;
-  MPSNNOptimizerStochasticGradientDescent *sgdWeights, *sgdBias;
-
-  MPSVectorDescriptor *vDescWeights;
-  MPSVectorDescriptor *vDescBiases;
 
   id<MTLCommandQueue> cq;
-
-@public
-  MPSCNNConvolutionWeightsAndBiasesState *convWtsAndBias;
 }
+
 - (nonnull instancetype)initWithKernelWidth:(NSUInteger)kernelWidth
                                kernelHeight:(NSUInteger)kernelHeight
                        inputFeatureChannels:(NSUInteger)inputFeatureChannels
@@ -75,7 +65,7 @@
                                   cmd_queue:(id<MTLCommandQueue> _Nonnull) cmd_q
                             init_weight_ptr:(float* __nullable) w_ptr
                               init_bias_ptr:(float* __nullable) b_ptr
-                           optimizerOptions:(OptimizerOptions)optimizerOptions;
+                           optimizerOptions:(turi::mps::OptimizerOptions)optimizerOptions;
 
 - (nonnull instancetype)initWithKernelWidth:(NSUInteger)kernelWidth
                                kernelHeight:(NSUInteger)kernelHeight
@@ -91,7 +81,9 @@
                                   cmd_queue:(id<MTLCommandQueue> _Nonnull) cmd_q
                             init_weight_ptr:(float* __nullable) w_ptr
                               init_bias_ptr:(float* __nullable) b_ptr
-                           optimizerOptions:(OptimizerOptions)optimizerOptions;
+                           optimizerOptions:(turi::mps::OptimizerOptions)optimizerOptions;
+
+@property (nonatomic, readonly, nonnull) MPSCNNConvolutionWeightsAndBiasesState *state;
 
 - (MPSDataType)dataType;
 - (MPSCNNConvolutionDescriptor *__nonnull)descriptor;
@@ -115,15 +107,17 @@ updateWithCommandBuffer:(__nonnull id<MTLCommandBuffer>)commandBuffer
                 (MPSCNNConvolutionWeightsAndBiasesState *__nonnull)sourceState;
 - (void)checkpoint;
 - (void)checkpointWithCommandQueue:(nonnull id<MTLCommandQueue>)commandQueue;
-@end /* RandomWeights */
 
-@interface BNData : NSObject <MPSCNNBatchNormalizationDataSource> {
+@end  // TCMPSConvolutionWeights
+
+API_AVAILABLE(macos(10.14))
+@interface TCMPSBatchNormWeights : NSObject <MPSCNNBatchNormalizationDataSource> {
 @private
   NSUInteger _channels;
   float *_betaPointer, *_gammaPointer, *_betaMomentumPointer,
       *_betaVelocityPointer, *_gammaVelocityPointer, *_gammaMomentumPointer,
       *_movingVariancePointer, *_movingMeanPointer;
-  OptimizerOptions _optimizerOptions;
+  turi::mps::OptimizerOptions _optimizerOptions;
   float t;
   float _batchNormEpsilon;
 
@@ -139,15 +133,12 @@ updateWithCommandBuffer:(__nonnull id<MTLCommandBuffer>)commandBuffer
   id<MTLBuffer> gammaMomentumBuffer, betaMomentumBuffer, gammaVelocityBuffer,
       betaVelocityBuffer, gammaBuffer, betaBuffer, movingVarianceBuffer,
       movingMeanBuffer;
-  MPSVector *gammaMomentumVector, *betaMomentumVector, *gammaVelocityVector,
-      *betaVelocityVector, *gammaVector, *betaVector, *movingVarianceVector,
-      *movingMeanVector;
 
   NSString *_label;
-@public
-  MPSCNNNormalizationGammaAndBetaState *gammaBetaState;
-  MPSCNNNormalizationMeanAndVarianceState *meanVarianceState;
 }
+
+@property(readonly, nonatomic, nonnull) MPSCNNNormalizationGammaAndBetaState *gammaBetaState;
+@property(readonly, nonatomic, nonnull) MPSCNNNormalizationMeanAndVarianceState *meanVarianceState;
 
 @property(readwrite, retain, nonatomic, nonnull) NSString *internalLabel;
 
@@ -160,7 +151,7 @@ updateWithCommandBuffer:(__nonnull id<MTLCommandBuffer>)commandBuffer
                                     beta:(float *__nullable)b_ptr
                               moving_avg:(float *__nullable)ma_ptr
                               moving_var:(float *__nullable)mv_ptr
-                        optimizerOptions:(OptimizerOptions)optimizerOptions
+                        optimizerOptions:(turi::mps::OptimizerOptions)optimizerOptions
                         batchNormEpsilon:(float)batchNormEpsilon;
 
 // MPSCNNBatchNormalizationDataSource interface methods
@@ -183,7 +174,7 @@ updateWithCommandBuffer:(__nonnull id<MTLCommandBuffer>)commandBuffer
 - (BOOL)updateGammaAndBetaWithBatchNormalizationState:
     (MPSCNNBatchNormalizationState *__nonnull)batchNormalizationState;
 
-@end // MyBatchNormData
+@end  // TCMPSBatchNormWeights
 
 
 #endif /* MPS_WEIGHT_H_ */

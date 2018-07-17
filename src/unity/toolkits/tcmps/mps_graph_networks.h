@@ -15,6 +15,9 @@
 #import "mps_networks.h"
 #import "mps_utils.h"
 
+namespace turi {
+namespace mps {
+
 struct GraphLayer;
 
 enum GraphNetworkType {
@@ -49,9 +52,9 @@ struct MPSGraphNetwork {
 };
 
 // Factory function to create a network
-MPSGraphNetwork *_Nonnull createNetworkGraph(GraphNetworkType network_id,
-                                             const std::vector<int> &params,
-                                             const FloatArrayMap &config);
+std::unique_ptr<MPSGraphNetwork> createNetworkGraph(
+    GraphNetworkType network_id, const std::vector<int> &params,
+    const FloatArrayMap &config);
 
 // Various networks
 // ---------------------------------------------------------------------------------------------
@@ -171,5 +174,7 @@ struct ODNetworkGraph : public MPSGraphNetwork {
   }
 };
 
+}  // namespace mps
+}  // namespace turi
 
 #endif

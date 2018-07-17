@@ -14,6 +14,7 @@
 
 // Returns true if a TC error was handled (in which case,
 // the NSError * will get populated if it's non-null).
+API_AVAILABLE(macos(10.13))
 static bool handleError(tc_error* error_ptr, NSError** error) {
     if (error_ptr) {
         if (error) {
@@ -44,7 +45,8 @@ static bool handleError(tc_error* error_ptr, NSError** error) {
     return @[@"probabilities", @"recommendations"];
 }
 
-- (nullable MLFeatureValue *)featureValueForName:(nonnull NSString *)featureName {
+- (nullable MLFeatureValue *)featureValueForName:(nonnull NSString *)featureName
+  API_AVAILABLE(macos(10.13)) {
     tc_sarray *item_ids_array;
     tc_sarray *scores_array;
     tc_sarray *ranks_array;
@@ -106,7 +108,7 @@ static bool handleError(tc_error* error_ptr, NSError** error) {
                         assert(false); // no way to propagate error to caller
                         return nil;
                     }
-                    scores[[NSString stringWithFormat:@"%lli", item_id_key]] = @(score);
+                    scores[[NSNumber numberWithInteger:item_id_key]] = @(score);
                     break;
                 }
                 case FT_TYPE_STRING: {
@@ -160,7 +162,7 @@ static bool handleError(tc_error* error_ptr, NSError** error) {
                         assert(false); // no way to propagate error to caller
                         return nil;
                     }
-                    ranks[[NSString stringWithFormat:@"%lli", item_id_key]] = @(rank);
+                    ranks[[NSNumber numberWithInteger:item_id_key]] = @(rank);
                     break;
                 }
                 case FT_TYPE_STRING: {
@@ -428,6 +430,9 @@ static bool handleError(tc_error* error_ptr, NSError** error) {
     if (handleError(error_ptr, error)) {
         return nil;
     }
+
+    assert(recommendation_sframe != NULL);
+    assert(item_id_name != NULL);
     // Convert predictions to an id<MLFeatureProvider>
     return [[TCRecommenderOutput alloc] initWithSFrame:recommendation_sframe
                                           item_id_name:item_id_name

@@ -8,7 +8,7 @@
 // --------------------------------------------------------------------------------------------
 //                  Common utilities for all Layers
 // --------------------------------------------------------------------------------------------
-@implementation MyAllocator {
+@implementation TCMPSImageAllocator {
   MPSImageFeatureChannelFormat _format;
 }
 
@@ -92,6 +92,18 @@ imageForCommandBuffer:(__nonnull id<MTLCommandBuffer>)cmdBuf
   return self;
 }
 
+// We don't yet trigger any copies of this data source, but real implementations
+// here will be necessary to support training with additional GPUs
+- (instancetype)copyWithZone:(nullable NSZone *)zone {
+  assert(false && "NSCopying not implemented for MPSCNNWeight");
+  return self;
+}
+
+- (instancetype)copyWithZone:(nullable NSZone *)zone device:(nullable id <MTLDevice>)device {
+  assert(false && "NSCopying not implemented for MPSCNNWeight");
+  return self;
+}
+
 - (MPSDataType)dataType {
   return MPSDataTypeFloat32;
 }
@@ -136,6 +148,9 @@ imageForCommandBuffer:(__nonnull id<MTLCommandBuffer>)cmdBuf
 
 @end /* MPSCNNWeight */
 
+namespace turi {
+namespace mps {
+
 // --------------------------------------------------------------------------------------------
 //                                 Layer Implementations
 // --------------------------------------------------------------------------------------------
@@ -179,16 +194,14 @@ void ReLULayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q,
   op_forward = [[MPSCNNNeuronReLU alloc] initWithDevice:device a:a];
     
   if (is_output_layer || kLowLevelModeTest == net_mode){
-      op_forward.destinationImageAllocator = (MyAllocator * _Nonnull)
-          [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+      op_forward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
   }
   if (is_train){
       op_backward = [[MPSCNNNeuronGradient alloc] initWithDevice:device
                                                 neuronDescriptor:desc];
       
       if (kLowLevelModeTest == net_mode){
-          op_backward.destinationImageAllocator = (MyAllocator * _Nonnull)
-              [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+          op_backward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
       }
   }
 }
@@ -231,8 +244,7 @@ void ConvLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q,
   PaddingType pad_type = (PaddingType)iparams[6];
   use_bias = iparams[7] > 0;
 
-  weight = [RandomWeights alloc];
-
+  weight = [TCMPSConvolutionWeights alloc];
   weight = [weight initWithKernelWidth:k_w
                           kernelHeight:k_h
                   inputFeatureChannels:c_in
@@ -253,16 +265,14 @@ void ConvLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q,
   op_forward.padding = SetPaddingType(pad_type);
     
   if (is_output_layer || kLowLevelModeTest == net_mode){
-    op_forward.destinationImageAllocator = (MyAllocator * _Nonnull)
-        [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+    op_forward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
   }
   if (is_train){
       op_backward =
         [[MPSCNNConvolutionGradient alloc] initWithDevice:device weights:weight];
       
       if (kLowLevelModeTest == net_mode){
-          op_backward.destinationImageAllocator = (MyAllocator * _Nonnull)
-            [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+          op_backward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
       }
       op_backward.padding = SetPaddingType(pad_type);
   }
@@ -319,10 +329,10 @@ void ConvLayer::GpuUpdate(id<MTLCommandBuffer> _Nonnull cb){
     [weight updateWithCommandBuffer:cb gradientState:cnn_state];
     
     [op_forward reloadWeightsAndBiasesWithCommandBuffer:cb
-                                                  state:weight->convWtsAndBias];
+                                                  state:weight.state];
     if (op_backward){
         [op_backward reloadWeightsAndBiasesWithCommandBuffer:cb
-                                                      state:weight->convWtsAndBias];
+                                                      state:weight.state];
     }
 }
 void ConvLayer::Update(MPSUpdater *_Nonnull updater, int lid) {
@@ -408,7 +418,7 @@ void BNLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q,
 
     float batchNormEpsilon = get_array_map_scalar(config, "batch_norm_epsilon", 0.001f);
 
-    data = [BNData alloc];
+    data = [TCMPSBatchNormWeights alloc];
     data = [data initWithChannels:ch
            kernelParamsBinaryName:name.c_str()
                            device:device
@@ -424,8 +434,7 @@ void BNLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q,
       [[MPSCNNBatchNormalization alloc] initWithDevice:device dataSource:data];
   op_forward.epsilon = batchNormEpsilon;
   if (is_output_layer || kLowLevelModeTest == net_mode){
-    op_forward.destinationImageAllocator = (MyAllocator * _Nonnull)
-        [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+    op_forward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
   }
 
   if (is_train){
@@ -436,8 +445,7 @@ void BNLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q,
       [[MPSCNNBatchNormalizationGradient alloc] initWithDevice:device];
       
       if (kLowLevelModeTest == net_mode){
-          op_backward.destinationImageAllocator = (MyAllocator * _Nonnull)
-          [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+          op_backward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
           AllocImage(device, is_train);
           use_temp_images_ = false;
       }
@@ -449,7 +457,6 @@ void BNLayer::Load(const FloatArrayMap &weights) {
   std::string beta_key = name + "_beta";
   std::string var_key = name + "_running_var";
   std::string mean_key = name + "_running_mean";
-  int num_channel = ishape[3];
 
   if (weights.count(gamma_key) > 0){
     const FloatArray &arr = weights.at(gamma_key);
@@ -517,10 +524,10 @@ void BNLayer::GpuUpdate(id<MTLCommandBuffer> _Nonnull cb){
     [data updateGammaAndBetaWithCommandBuffer:cb batchNormalizationState:bn_state];
 
     [op_forward reloadGammaAndBetaWithCommandBuffer:cb
-                                  gammaAndBetaState:data->gammaBetaState];
+                                  gammaAndBetaState:data.gammaBetaState];
     
     [op_forward reloadMeanAndVarianceWithCommandBuffer:cb
-                                  meanAndVarianceState:data->meanVarianceState];
+                                  meanAndVarianceState:data.meanVarianceState];
 }
 
 
@@ -563,8 +570,7 @@ void MaxPoolLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q
   op_forward.padding = SAME;
     
   if (is_output_layer || kLowLevelModeTest == net_mode){
-    op_forward.destinationImageAllocator = (MyAllocator * _Nonnull)
-        [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+    op_forward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
   }
   if (is_train){
       op_backward = [[MPSCNNPoolingMaxGradient alloc] initWithDevice:device
@@ -574,8 +580,7 @@ void MaxPoolLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q
                                                      strideInPixelsY:sH];
       
       if (kLowLevelModeTest == net_mode){
-          op_backward.destinationImageAllocator = (MyAllocator * _Nonnull)
-              [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+          op_backward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
       }
       op_backward.padding = SAME;
   }
@@ -631,8 +636,7 @@ void DropOutLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q
       maskStrideInPixels:MTLSize{.width = 1, .height = 1, .depth = 1}];
 
   if (ALWAYS_ALLOCATE_DO_OUTPUT || is_output_layer || kLowLevelModeTest == net_mode){
-      op_forward.destinationImageAllocator = (MyAllocator * _Nonnull)
-      [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+      op_forward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
   }
   op_backward = [[MPSCNNDropoutGradient alloc]
           initWithDevice:device
@@ -641,8 +645,7 @@ void DropOutLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q
       maskStrideInPixels:MTLSize{.width = 1, .height = 1, .depth = 1}];
     
     if (ALWAYS_ALLOCATE_DO_OUTPUT || kLowLevelModeTest == net_mode){
-          op_backward.destinationImageAllocator = (MyAllocator * _Nonnull)
-              [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+          op_backward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
     }
 }
 
@@ -676,15 +679,13 @@ void SoftMaxLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_q
   op_forward = [[MPSCNNSoftMax alloc] initWithDevice:device];
 
   if (is_output_layer || kLowLevelModeTest == net_mode){
-      op_forward.destinationImageAllocator = (MyAllocator * _Nonnull)
-      [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+      op_forward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
   }
     
   if (is_train){
       op_backward = [[MPSCNNSoftMaxGradient alloc] initWithDevice:device];
 
-      op_backward.destinationImageAllocator = (MyAllocator * _Nonnull)
-          [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+      op_backward.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
   }
 }
 
@@ -702,7 +703,6 @@ void SmceLossLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_
                          const FloatArrayMap &config, bool is_train, LowLevelMode net_mode, bool is_output_layer) {
 
   assert(iparams.size() >= 1);
-  int batch_size = iparams[0];
 
   MPSCNNLossDescriptor *lossDesc = [MPSCNNLossDescriptor
       cnnLossDescriptorWithType:MPSCNNLossTypeSoftMaxCrossEntropy
@@ -713,8 +713,7 @@ void SmceLossLayer::Init(id<MTLDevice> _Nonnull device, id<MTLCommandQueue> cmd_
   op_loss = [[MPSCNNLoss alloc] initWithDevice:device lossDescriptor:lossDesc];
   
   if (kLowLevelModeTest == net_mode){
-    op_loss.destinationImageAllocator = (MyAllocator * _Nonnull)
-      [[MyAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
+    op_loss.destinationImageAllocator = [[TCMPSImageAllocator alloc] initWithFormat:MPSImageFeatureChannelFormatFloat32];
   }
 }
 
@@ -935,6 +934,9 @@ void LstmLayer::CopyImageBatchToBuffer(MPSImageBatch *imgBatch, id <MTLBuffer> b
         image_to_matrix_kernel_.destinationMatrixOrigin = MTLOriginMake(i, 0, 0);
         [image_to_matrix_kernel_ encodeToCommandBuffer:cb sourceImage:img destinationMatrix:matrix];
     }
+
+    // Release the image memory back to MPS.
+    MPSImageBatchIncrementReadCount(imgBatch, -1);
 }
 
 MPSImageBatch *LstmLayer::CopyImageBatchFromBuffer(id <MTLBuffer> buffer,
@@ -1128,9 +1130,5 @@ void LstmLayer::InitWeightCopyMatrices() {
     }
 }
 
-
-
-
-
-
-
+}  // namespace mps
+}  // namespace turi

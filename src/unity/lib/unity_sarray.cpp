@@ -96,7 +96,7 @@ void unity_sarray::construct_from_vector(const std::vector<flexible_type>& vec,
 
   auto sarray_ptr = std::make_shared<sarray<flexible_type>>();
 
-  sarray_ptr->open_for_write(1);
+  sarray_ptr->open_for_write(1, true /*disable padding*/);
   sarray_ptr->set_type(type);
 
   // ok. copy into the writer.
@@ -260,22 +260,31 @@ void unity_sarray::construct_from_json_record_files(std::string url) {
         const char* str = buffer.data();
         auto parse_result = parser.recursive_parse(&str, fsize);
         if (parse_result.second == false || parse_result.first.get_type() != flex_type_enum::LIST) {
-          logstream(LOG_PROGRESS) << "Unable to parse " << sanitize_url(p.first)  << ". "
-                                  << "It does not appear to be in JSON record format. "
-                                  << "A list of dictionaries is expected"  << std::endl;
-          continue;
+          std::stringstream error_msg;
+          error_msg << "Unable to parse " << sanitize_url(p.first)  << ". "
+                    << "It does not appear to be in JSON record format. "
+                    << "A list of dictionaries is expected"  << std::endl;
+
+          log_and_throw(error_msg.str());
         }
 
+        size_t num_elems_parsed = 0;
         bool has_non_dict_elements = false;
         for (const auto& element : parse_result.first.get<flex_list>()) {
           if (element.get_type() == flex_type_enum::DICT ||
               element.get_type() == flex_type_enum::UNDEFINED) {
             (*output) = element;
             ++output;
+            ++num_elems_parsed;
           } else {
             has_non_dict_elements = true;
           }
         }
+
+        logstream(LOG_PROGRESS) << "Successfully parsed an SArray of "
+                                << num_elems_parsed 
+                                << " elements from the JSON file "
+                                << sanitize_url(p.first);
 
         if (has_non_dict_elements) {
           logstream(LOG_PROGRESS) << sanitize_url(p.first)
@@ -1515,9 +1524,10 @@ std::shared_ptr<unity_sarray_base> unity_sarray::scalar_operator(flexible_type o
   // most of the time the scalar operators can skip undefined. Except
   //  - certain operators which depend on equality of values.
   //     like == or != or in.
+  //  - or if the binary operator does ternary logic
   //  - Or if the other scalar value is undefined.
-  bool op_is_equality_compare = (op == "==" || op == "!=" || op == "in");
-  if (other.get_type() == flex_type_enum::UNDEFINED || op_is_equality_compare) {
+  bool op_ternary = (op == "==" || op == "!=" || op == "in" || op == "&" || op == "|");
+  if (other.get_type() == flex_type_enum::UNDEFINED || op_ternary) {
     auto transformfn =
         [=](const flexible_type& f)->flexible_type {
           return right_operator ? binaryfn(other, f) : binaryfn(f, other);
@@ -1582,28 +1592,59 @@ std::shared_ptr<unity_sarray_base> unity_sarray::vector_operator(
   auto transformfn =
       unity_sarray_binary_operations::get_binary_operator(dtype(), other->dtype(), op);
 
-  bool op_is_not_equality_compare = (op != "==" && op != "!=");
-  bool op_is_equality = (op == "==");
-  auto transform_fn_with_undefined_checking =
-      [=](const sframe_rows::row& frow,
-          const sframe_rows::row& grow)->flexible_type {
-        const auto& f = frow[0];
-        const auto& g = grow[0];
-        if (f.get_type() == flex_type_enum::UNDEFINED ||
-            g.get_type() == flex_type_enum::UNDEFINED) {
-          if (op_is_not_equality_compare) {
-            // op is not == or !=
-            return FLEX_UNDEFINED;
-          } else if (op_is_equality) {
-            // op is ==
+  query_eval::binary_transform_type transform_fn_with_undefined_checking;
+  if (op == "==") {
+    transform_fn_with_undefined_checking =
+        [=](const sframe_rows::row& frow,
+            const sframe_rows::row& grow)->flexible_type {
+          const auto& f = frow[0];
+          const auto& g = grow[0];
+          if (f.get_type() == flex_type_enum::UNDEFINED ||
+              g.get_type() == flex_type_enum::UNDEFINED) {
+            // this says (UNDEFINED == UNDEFINED) == True
+            // and false in all other cases where an UNDEFINED appears
             return f.get_type() == g.get_type();
-          } else {
-            // op is !=
+          }
+          else return transformfn(f, g);
+        };
+  } else if (op == "!=") {
+    transform_fn_with_undefined_checking =
+        [=](const sframe_rows::row& frow,
+            const sframe_rows::row& grow)->flexible_type {
+          const auto& f = frow[0];
+          const auto& g = grow[0];
+          if (f.get_type() == flex_type_enum::UNDEFINED ||
+              g.get_type() == flex_type_enum::UNDEFINED) {
+            // this says (UNDEFINED != UNDEFINED) == False
+            // and true in all other cases where an UNDEFINED appears
             return f.get_type() != g.get_type();
           }
-        }
-        else return transformfn(f, g);
-      };
+          else return transformfn(f, g);
+        };
+  } else if (op == "&" || op == "|") {
+    // these do ternary logic
+    transform_fn_with_undefined_checking =
+        [=](const sframe_rows::row& frow,
+            const sframe_rows::row& grow)->flexible_type {
+          const auto& f = frow[0];
+          const auto& g = grow[0];
+          return transformfn(f, g);
+        };
+  } else {
+    // all others constant propagate
+    transform_fn_with_undefined_checking =
+        [=](const sframe_rows::row& frow,
+            const sframe_rows::row& grow)->flexible_type {
+          const auto& f = frow[0];
+          const auto& g = grow[0];
+          if (f.get_type() == flex_type_enum::UNDEFINED ||
+              g.get_type() == flex_type_enum::UNDEFINED) {
+            return FLEX_UNDEFINED;
+          }
+          else return transformfn(f, g);
+        };
+  }
+
   auto ret = std::make_shared<unity_sarray>();
   ret->construct_from_planner_node(
       op_binary_transform::make_planner_node(m_planner_node,
@@ -2600,8 +2641,13 @@ struct slicer_impl {
       else real_start = m_start;
     } else {
       // default values
-      if (m_step > 0) real_start = 0;
-      else if (m_step < 0) real_start = s.size() - 1;
+      if (m_step > 0) {
+        real_start = 0;
+      } else if (m_step < 0) {
+        real_start = s.size() - 1;
+      } else {
+        log_and_throw("Step value for a slice cannot be zero.");
+      }
     }
 
     int64_t real_stop;
@@ -2610,8 +2656,13 @@ struct slicer_impl {
       else real_stop = m_stop;
     } else {
       // default values
-      if (m_step > 0) real_stop = s.size();
-      else if (m_step < 0) real_stop = -1;
+      if (m_step > 0) {
+        real_stop = s.size();
+      } else if (m_step < 0) {
+        real_stop = -1;
+      } else {
+        log_and_throw("Step value for a slice cannot be zero.");
+      }
     }
 
     if (m_step > 0 && real_start < real_stop) {
@@ -2626,7 +2677,10 @@ struct slicer_impl {
       for (int64_t i = real_start; i > real_stop; i += m_step) {
         ret.push_back(s[i]);
       }
+    } else {
+      // Slice is empty; append no items to return vector.
     }
+
     return ret;
   }
 };
